@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holisticare-rag"
+version = "0.1.0"
+description = "Local RAG health assistant over conventional and integrative medicine texts"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Krishna Annavaram" }]
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "pandas>=2.1", "scikit-learn>=1.4"]
+
+[project.optional-dependencies]
+pdf = ["pypdf>=4.0"]
+st = ["sentence-transformers>=2.6"]
+ui = ["streamlit>=1.32"]
+all = ["holisticare-rag[pdf,st,ui]"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+holisticare = "holisticare_rag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
