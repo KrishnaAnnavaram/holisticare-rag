@@ -9,7 +9,7 @@
 ![Safety](https://img.shields.io/badge/Safety-triage_before_retrieval-1F3864?style=for-the-badge)
 ![Retrieval](https://img.shields.io/badge/Retrieval-BM25_%2B_vectors-2E5FD9?style=for-the-badge)
 ![Citations](https://img.shields.io/badge/Citations-checked_per_sentence-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-45_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-44_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -106,7 +106,7 @@ holisticare-rag gives each of these questions its own component. All of them run
 | Providers | Optional: Ollama or an OpenAI-compatible server for generation, sentence-transformers or Ollama for vectors |
 | Offline mode | Everything. Hashing vectors, BM25 and an extractive answer need no model and no network |
 | Safety | Triage before retrieval, a relevance gate, a citation check, a dose filter, a disclaimer on every answer |
-| Tests | **45** unit tests pass locally. In CI, 44 pass and 1 skips (the Streamlit test) |
+| Tests | **44** unit tests pass in CI (`pytest`), 1 skips without the `ui` extra (Streamlit). With the extra: 45 pass |
 
 ```mermaid
 flowchart LR
@@ -159,7 +159,7 @@ holisticare-rag/
 ├── data/README.md             # how to add documents, registry fields, open sources (no data files)
 ├── docs/ste-style-guide.md    # writing rules and project vocabulary
 ├── src/holisticare_rag/       # the package (one module per component, see 2.1)
-├── tests/                     # 45 offline tests on the fictional knowledge base
+├── tests/                     # 45 offline tests on the fictional knowledge base (1 needs Streamlit)
 ├── .env.example               # variable names only
 ├── pyproject.toml             # dependencies, extras, the holisticare command
 └── LICENSE                    # MIT
@@ -451,8 +451,8 @@ The settings come from the environment and from a local `.env` file. An environm
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests, local (with Streamlit) | **45 passed** | `pytest -q` |
-| Unit tests in CI (no Streamlit) | **44 passed, 1 skipped** | `pytest -q` |
+| Unit tests (CI installs only `.[dev]`) | **44 passed, 1 skipped** (the Streamlit test) | `pytest -q` |
+| Unit tests with the `ui` extra (Streamlit) | **45 passed** | `pytest -q` |
 | Question set on the fictional knowledge base | See the table below | `holisticare demo` |
 
 The demo uses the fictional knowledge base (7 documents, 28 chunks, hashing vectors) and the extractive answer. The question set has 18 questions: 11 answerable, 2 off-topic and 5 triage cases. The answerable questions include 2 follow-ups, 2 with injection text or braces and 1 with a pregnancy caution. **These numbers come from synthetic, fictional text.** They show that the pipeline and the rules work. They do not show the quality on real medical documents.
