@@ -70,6 +70,7 @@ This README is the **one location that explains all of holisticare-rag**. It giv
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one question](#42-the-life-cycle-of-one-question)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The knowledge base and the index](#5-the-knowledge-base-and-the-index)
 6. 🟢 [Retrieval and the relevance gate](#6-retrieval-and-the-relevance-gate)
 7. 🟣 [Generation and the answer checks](#7-generation-and-the-answer-checks)
@@ -138,6 +139,52 @@ flowchart LR
 | Streamlit app | `src/holisticare_rag/app.py` | Chat page with cached resources (extra `ui`) |
 | CLI | `src/holisticare_rag/cli.py` | The `holisticare` command |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    subgraph ENTRY["Entry points"]
+        CLI["cli.py<br/>holisticare command"]
+        APP["app.py<br/>Streamlit chat, extra ui"]
+        EVA["evaluate.py<br/>evaluate, load_questions"]
+    end
+    SVC["service.py<br/>Assistant.ask"]
+    subgraph KB["Knowledge base"]
+        IDX["index.py<br/>ensure_index, BM25"]
+        ING["ingest.py<br/>ingest, docs_fingerprint"]
+        EMB["embed.py<br/>make_embedder"]
+    end
+    subgraph QA["Question steps"]
+        SAF["safety.py<br/>triage, remove_doses"]
+        RW["rewrite.py<br/>retrieval_query"]
+        RET["retrieve.py<br/>retrieve"]
+        PR["prompts.py<br/>build_messages"]
+        LLM["llm.py<br/>OllamaChat, OpenAICompatChat"]
+        ANS["answer.py<br/>extractive_answer, check_citations"]
+    end
+    CFG["config.py<br/>Settings"]
+    SYN["synthetic.py<br/>write, eval_set"]
+    TXT["text.py<br/>content_tokens, sentences"]
+
+    CLI --> CFG
+    CLI --> SYN
+    CLI --> EVA
+    CLI --> SVC
+    APP --> SVC
+    EVA --> SVC
+    SVC --> IDX
+    SVC --> EMB
+    IDX --> ING
+    SVC --> SAF
+    SVC --> RW
+    SVC --> RET
+    SVC --> PR
+    SVC --> LLM
+    SVC --> ANS
+    RET --> TXT
+    ANS --> TXT
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -178,6 +225,19 @@ The relevance gate needs a passage that holds at least half of the content token
 ### 3.3 User text never becomes an instruction
 The system message is a constant. The history goes to the model as separate user and assistant messages. No template engine reads user text, so braces and "ignore the instructions" stay plain data.
 
+```mermaid
+flowchart LR
+    SYS["SYSTEM<br/>constant in prompts.py"] --> M1["message 1<br/>role system"]
+    H[/"Chat history"/] --> KEEP["Keep the last<br/>HISTORY_TURNS turns,<br/>user and assistant only"]
+    KEEP --> M2["messages 2 to n<br/>role user or assistant"]
+    P[/"Numbered passages"/] --> BLK["passage_block"]
+    Q[/"Question"/] --> LAST["last message, role user<br/>Passages + Question"]
+    BLK --> LAST
+    M1 --> LIST[/"Message list<br/>to the chat model"/]
+    M2 --> LIST
+    LAST --> LIST
+```
+
 ### 3.4 One citation for each sentence
 A model answer must cite a passage in at least 80 % of its sentences, and each citation must point to a passage that exists. Otherwise the assistant uses the extractive answer. Each citation shows the passage sentence that supports it best.
 
@@ -197,27 +257,67 @@ The index is JSON Lines, JSON and a NumPy array loaded with `allow_pickle=False`
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    Q["question"] --> T{"safety triage"}
-    T -->|"emergency, self_harm, dosing, stop_medication"| FIX["fixed reply + disclaimer"]
+flowchart TD
+    DOCS[/"Document folder<br/>+ sources.json"/] --> ENS["ensure_index<br/>reuse, build or rebuild"]
+    ENS --> IDX[("Index folder<br/>chunks.jsonl, vectors.npy,<br/>manifest.json")]
+    Q[/"question + history"/] --> T{"safety triage"}
+    T -->|"emergency, self_harm, dosing, stop_medication"| FIX[/"fixed reply + disclaimer"/]
     T -->|"ok (+ cautions)"| RW["retrieval query (adds earlier topic for follow-ups)"]
     RW --> BM["BM25 ranking"]
     RW --> VS["vector ranking"]
+    IDX --> BM
+    IDX --> VS
     BM --> F["reciprocal-rank fusion"]
     VS --> F
     F --> G{"relevance gate"}
-    G -->|"no passage passes"| NS["no-source reply"]
+    G -->|"no passage passes"| NS[/"no-source reply"/]
     G -->|"passages"| M{"chat model set?"}
     M -->|"yes"| LLM["model with constant system message and history messages"]
     M -->|"no"| EX["extractive answer"]
     LLM --> CC{"citation check"}
+    LLM -->|"model error"| EX
     CC -->|"fails"| EX
     CC -->|"passes"| DF["dose filter"]
     EX --> DF
-    DF --> OUT["answer, quotes, labels, cautions, disclaimer"]
+    DF --> OUT[/"answer, quotes, labels, cautions, disclaimer"/]
+    OUT --> HUMAN{{"HUMAN<br/>a health professional<br/>reviews each decision"}}
+    FIX --> HUMAN
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one question
+
+The `category` field of the `Answer` gives the end state of each question.
+
+```mermaid
+stateDiagram-v2
+    state "Received" as Received
+    state "Retrieval query" as Query
+    state "Passages found" as Retrieved
+    state "Model reply" as Reply
+    state "Draft answer" as Draft
+    [*] --> Received: ask(question, history)
+    Received --> self_harm: triage stop
+    Received --> emergency: triage stop
+    Received --> stop_medication: triage stop
+    Received --> dosing: triage stop
+    Received --> Query: triage ok, cautions kept
+    Query --> Retrieved: retrieve
+    Retrieved --> no_source: best coverage below MIN_COVERAGE
+    Retrieved --> Reply: chat model set
+    Retrieved --> Draft: no chat model, extractive_answer
+    Reply --> Draft: check_citations passes
+    Reply --> Draft: check fails or model error, extractive_answer
+    Draft --> ok: remove_doses, citations_for, disclaimer
+    self_harm --> [*]
+    emergency --> [*]
+    stop_medication --> [*]
+    dosing --> [*]
+    no_source --> [*]
+    ok --> [*]
+```
 
 1. Check the question with the triage rules.
 2. If the category stops the question, return the fixed reply and the disclaimer.
@@ -230,11 +330,64 @@ flowchart TB
 9. Remove each sentence that states a dose or a schedule.
 10. Add the quotes, the cautions, the notes and the disclaimer.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant CLI as holisticare CLI
+    participant AS as Assistant
+    participant IX as Index folder
+    participant SF as safety.py
+    participant RT as retrieve.py
+    participant LM as Chat model, Ollama or OpenAI-compatible
+    participant AN as answer.py
+
+    U->>CLI: holisticare ask "question"
+    CLI->>CLI: Settings.from_env
+    CLI->>AS: Assistant.from_settings
+    AS->>IX: ensure_index, compare fingerprint
+    IX-->>AS: index and status reused, built or rebuilt
+    CLI->>AS: ask(question)
+    AS->>SF: triage(question)
+    SF-->>AS: category, cautions
+    AS->>AS: retrieval_query(question, history)
+    AS->>RT: retrieve(index, embedder, query, top_k, min_coverage)
+    RT-->>AS: passages, has_evidence, best_coverage
+    AS->>LM: complete(build_messages), only if a chat model is set
+    LM-->>AS: reply text
+    AS->>AN: check_citations(reply)
+    AN-->>AS: reasons, empty if the reply passes
+    AS->>AN: extractive_answer, if no valid reply
+    AS->>SF: remove_doses(sentences)
+    AS->>AN: citations_for(text, passages)
+    AS-->>CLI: Answer
+    CLI-->>U: answer, cautions, sources with quotes, notes, disclaimer
+```
+
 ---
 
 ## 5. The knowledge base and the index
 
 **Purpose.** Turn a folder of labelled documents into searchable chunks, and build the index again only when something changes.
+
+```mermaid
+flowchart LR
+    DIR[/"Document folder"/] --> LIST["list_documents<br/>.md, .txt, .pdf"]
+    REG[/"sources.json"/] --> LOADR["load_registry"]
+    LIST --> SRC{"Entry in<br/>the registry?"}
+    LOADR --> SRC
+    SRC -- "no" --> UNK["Label unknown,<br/>warning in IngestReport"]
+    SRC -- "yes" --> PG["_pages<br/>one page at a time for a PDF"]
+    UNK --> PG
+    PG --> SEC["_sections<br/>split at Markdown headings"]
+    SEC --> SPL["split_text<br/>CHUNK_CHARS, CHUNK_OVERLAP"]
+    SPL --> CH["Chunk: source, title, section,<br/>page, evidence, tradition"]
+    CH --> EMB["embedder.embed"]
+    EMB --> SAVE["save_index"]
+    SAVE --> OUT[("chunks.jsonl, vectors.npy,<br/>manifest.json")]
+```
 
 | Input | Output |
 |---|---|
@@ -243,7 +396,7 @@ flowchart TB
 **Procedure**
 
 1. List the `.md`, `.txt` and `.pdf` files in the document folder and its sub-folders.
-2. Find the registry entry of each file. A file with no entry gets the label `unknown` and a warning.
+2. Find the registry entry of each file. A file with no entry gets the label `unknown`. The ingestion report records a warning, but the `index` command does not print it.
 3. Read the text (one page at a time for a PDF).
 4. Split the text into sections at Markdown headings.
 5. Split each section at sentence and paragraph borders into chunks of at most `HOLISTICARE_CHUNK_CHARS` characters, with an overlap.
@@ -254,6 +407,21 @@ flowchart TB
 **Rules**
 
 - `ensure_index` reuses the saved index only if the fingerprint and the format version match. The status is `reused`, `built` or `rebuilt`.
+
+```mermaid
+flowchart TD
+    IN[/"Settings and embedder"/] --> FP["docs_fingerprint: SHA-256 of paths, contents,<br/>sources.json, chunk settings, embedder name"]
+    FP --> M{"manifest.json exists<br/>and no --force?"}
+    M -- "no" --> NEW{"manifest.json exists?"}
+    M -- "yes" --> SAME{"Same fingerprint and<br/>FORMAT_VERSION?"}
+    SAME -- "yes" --> LOAD["load_index<br/>allow_pickle False"]
+    LOAD --> R[/"status reused"/]
+    SAME -- "no" --> NEW
+    NEW -- "yes" --> RB["build_index, save_index"]
+    NEW -- "no" --> B["build_index, save_index"]
+    RB --> S1[/"status rebuilt"/]
+    B --> S2[/"status built"/]
+```
 - A PDF needs the extra `pdf` (`pypdf`). Scanned PDFs without a text layer give no text.
 
 ---
@@ -261,6 +429,24 @@ flowchart TB
 ## 6. Retrieval and the relevance gate
 
 **Purpose.** Find the passages that answer the question, and refuse when there are none.
+
+```mermaid
+flowchart TD
+    Q[/"Retrieval query"/] --> QT["query_tokens<br/>content tokens + QUERY_SYNONYMS"]
+    QT --> E{"No query token<br/>or empty index?"}
+    E -- "yes" --> NONE[/"No passages, has_evidence false"/]
+    E -- "no" --> BM["BM25 scores<br/>k1 1.5, b 0.75"]
+    E -- "no" --> COS["Cosine: chunk vectors<br/>x embed(query)"]
+    BM --> TOP["Top 30 of each list"]
+    COS --> TOP
+    TOP --> RRF["Reciprocal-rank fusion<br/>RRF_K 60"]
+    RRF --> DED["Remove duplicates,<br/>keep the top TOP_K"]
+    DED --> CV["Coverage of each passage:<br/>best of full query and<br/>each question sentence"]
+    CV --> Z["Remove passages<br/>with coverage 0, number them"]
+    Z --> G{"Best coverage at least<br/>MIN_COVERAGE?"}
+    G -- "yes" --> EV[/"Passages, has_evidence true"/]
+    G -- "no" --> NS[/"Passages, has_evidence false<br/>no-source reply"/]
+```
 
 | Input | Output |
 |---|---|
@@ -278,14 +464,46 @@ flowchart TB
 
 **Rules**
 
-- A follow-up has a leading phrase such as "what about" or "and", or three or fewer content tokens with a pronoun. Its retrieval query adds up to 8 tokens from earlier user questions.
+- A follow-up has a leading phrase such as "what about" or "and", or three or fewer content tokens with a pronoun. Its retrieval query adds up to 8 tokens from earlier user questions. A question with two or fewer content tokens also gets these tokens.
 - The model answers the original question. Only the retrieval query changes.
+
+```mermaid
+flowchart LR
+    Q[/"Question + history"/] --> H{"History<br/>is empty?"}
+    H -- "yes" --> SAME[/"Retrieval query =<br/>the question"/]
+    H -- "no" --> F{"is_follow_up, or<br/>2 or fewer content tokens?"}
+    F -- "no" --> SAME
+    F -- "yes" --> WALK["Read earlier user messages,<br/>newest first"]
+    WALK --> ADD["Add their new content tokens,<br/>up to 8"]
+    ADD --> OUT[/"Retrieval query =<br/>question + added tokens"/]
+```
 
 ---
 
 ## 7. Generation and the answer checks
 
 **Purpose.** Write a short answer from the passages only, and check it before the user sees it.
+
+```mermaid
+flowchart TD
+    IN[/"Question, passages, history"/] --> CM{"HOLISTICARE_LLM"}
+    CM -- "extractive" --> EX["extractive_answer"]
+    CM -- "ollama or openai" --> BM["build_messages"]
+    BM --> CALL["chat.complete<br/>temperature, token cap"]
+    CALL -- "error" --> NE["note: model error"]
+    NE --> EX
+    CALL -- "reply" --> CC{"check_citations<br/>gives reasons?"}
+    CC -- "yes" --> NR["note: model answer refused"]
+    NR --> EX
+    CC -- "no" --> TXT["Model text,<br/>model name kept"]
+    EX --> DOSE["remove_doses<br/>on each sentence"]
+    TXT --> DOSE
+    DOSE --> DN{"Sentence removed?"}
+    DN -- "yes" --> NOTE["Add DOSE_NOTE"]
+    DN -- "no" --> CIT["citations_for<br/>best_sentence quote per passage"]
+    NOTE --> CIT
+    CIT --> OUT[/"Answer, category ok"/]
+```
 
 | Input | Output |
 |---|---|
@@ -307,15 +525,70 @@ flowchart TB
 | Parts | evidence-based, unlabelled, traditional (with the evidence statement) |
 | Citation form | `sentence [n].` |
 
+```mermaid
+flowchart LR
+    P[/"Passages in rank order"/] --> R["Next passage: rank its sentences<br/>by overlap with the question"]
+    R --> PICK{"One of the top 2 has overlap<br/>above 0 and is not picked?"}
+    PICK -- "yes" --> ADD["Keep that sentence<br/>with citation [n]"]
+    PICK -- "no" --> MORE{"More passages?"}
+    ADD --> MAX{"4 sentences?"}
+    MAX -- "no" --> MORE
+    MORE -- "yes" --> R
+    MAX -- "yes" --> GRP["Group by evidence label"]
+    MORE -- "no" --> GRP
+    GRP --> EB["From evidence-based sources"]
+    GRP --> UN["From sources without<br/>an evidence label"]
+    GRP --> TR["From traditional-medicine sources<br/>+ TRADITIONAL_NOTE"]
+    EB --> OUT[/"Extractive answer"/]
+    UN --> OUT
+    TR --> OUT
+```
+
 | Citation check | Result |
 |---|---|
 | No sentence with three or more content tokens | Refused: empty answer |
 | A citation number outside 1..number of passages | Refused |
 | Fewer than 80 % of the sentences have a citation | Refused |
 
+```mermaid
+flowchart TD
+    IN[/"Model reply, number of passages"/] --> S["Sentences with 3 or more<br/>content tokens"]
+    S --> E{"No sentence?"}
+    E -- "yes" --> R1[/"Refused: empty answer"/]
+    E -- "no" --> N{"Citation number outside<br/>1 to number of passages?"}
+    N -- "yes" --> R2["Reason: passages<br/>that do not exist"]
+    N -- "no" --> C{"Cited share<br/>below 0.8?"}
+    R2 --> C
+    C -- "yes" --> R3["Reason: too few<br/>cited sentences"]
+    C -- "no" --> D{"Any reason?"}
+    R3 --> D
+    D -- "yes" --> REF[/"Refused, use the extractive answer"/]
+    D -- "no" --> PASS[/"Passes"/]
+```
+
 ---
 
 ## 8. The safety rules
+
+`safety.triage` checks the lower-case question against the pattern lists in a fixed order. The first match stops the question.
+
+```mermaid
+flowchart TD
+    Q[/"Question, lower case"/] --> SH{"_SELF_HARM<br/>pattern?"}
+    SH -- "yes" --> R1[/"self_harm<br/>SELF_HARM_TEXT"/]
+    SH -- "no" --> EM{"_EMERGENCY<br/>pattern?"}
+    EM -- "yes" --> R2[/"emergency<br/>EMERGENCY_TEXT"/]
+    EM -- "no" --> SM{"_STOP_MED<br/>pattern?"}
+    SM -- "yes" --> R3[/"stop_medication<br/>STOP_MEDICATION_TEXT"/]
+    SM -- "no" --> DO{"_DOSING<br/>pattern?"}
+    DO -- "yes" --> R4[/"dosing<br/>DOSING_TEXT"/]
+    DO -- "no" --> CA["Check _PREGNANCY<br/>and _CHILD patterns"]
+    CA --> OK[/"ok, with 0, 1 or 2 cautions<br/>retrieval continues"/]
+    R1 --> STOP["stop: no retrieval,<br/>no model call, + DISCLAIMER"]
+    R2 --> STOP
+    R3 --> STOP
+    R4 --> STOP
+```
 
 | Category | Example trigger | Result | Retrieval or model call? |
 |---|---|---|---|
@@ -407,6 +680,18 @@ pytest -q
 | `holisticare ui` | Starts the Streamlit chat page |
 | `holisticare demo` | Runs `synth`, `index`, three questions and `eval` |
 
+`holisticare demo` runs these steps in this order, with the extractive answer and a new index:
+
+```mermaid
+flowchart LR
+    S["synthetic.write<br/>documents + eval.jsonl"] --> I["cmd_index, force<br/>out-dir/index"]
+    I --> A1["ask: Tarsil cough<br/>answer"]
+    A1 --> A2["ask: mg of Kelvar root<br/>dosing reply"]
+    A2 --> A3["ask: bicycle brakes<br/>no-source reply"]
+    A3 --> E["cmd_eval<br/>18 questions"]
+    E --> OUT[/"Summary metrics +<br/>eval_results.csv"/]
+```
+
 ### 10.4 Environment variables
 
 | Variable | Used by | Meaning |
@@ -456,6 +741,18 @@ The settings come from the environment and from a local `.env` file. An environm
 | Question set on the fictional knowledge base | See the table below | `holisticare demo` |
 
 The demo uses the fictional knowledge base (7 documents, 28 chunks, hashing vectors) and the extractive answer. The question set has 18 questions: 11 answerable, 2 off-topic and 5 triage cases. The answerable questions include 2 follow-ups, 2 with injection text or braces and 1 with a pregnancy caution. **These numbers come from synthetic, fictional text.** They show that the pipeline and the rules work. They do not show the quality on real medical documents.
+
+`evaluate.evaluate` asks each question of the set and calculates the metrics from the answers:
+
+```mermaid
+flowchart LR
+    QS[/"eval.jsonl: question, expect,<br/>sources, history"/] --> ASK["Assistant.ask<br/>for each item"]
+    ASK --> ROW["Row: category_ok, hit,<br/>cited, cited_expected, supported"]
+    ROW --> DF["pandas table"]
+    DF --> SUM["Summary: category_accuracy,<br/>retrieval_hit@k, citation_precision,<br/>supported_sentences, refusal precision and recall"]
+    DF --> CSV[/"eval_results.csv"/]
+    SUM --> SP["system_prompt_unchanged<br/>SYSTEM compared again"]
+```
 
 | Metric (synthetic question set) | Value |
 |---|---|
